@@ -287,7 +287,9 @@ namespace RyGT.Server
             object result;
             switch (request.Path)
             {
-                case "/auth/sign_in": result = SignIn(body as Dictionary<string, object>); break;
+                case "/auth/sign_in":
+                    result = SignIn(body as Dictionary<string, object>, request.Header("X-RyGT-Player-Country"));
+                    break;
                 case "/auth/sign_out": result = new Dictionary<string, object>(); break;
                 case "/analytics/report_error_code":
                     log("GT7 reports error " + Field(body, "code") + (user != null ? " (" + user["np_online_id"] + ")" : ""));
@@ -374,23 +376,37 @@ namespace RyGT.Server
         /// POST /auth/sign_in: {"code", "id_token", "runtime_info": {..., "user_info": {"np_online_id"}}}.
         /// The PSN code and ID token are not checked (RyGT's PSN is shadNet). The reply holds the
         /// player's tokens and Vegas user; GT7 reads the tokens' claims but not their signatures.
-        object SignIn(Dictionary<string, object> body)
+        object SignIn(Dictionary<string, object> body, string country)
         {
             string onlineId = Field(Field(Field(body, "runtime_info"), "user_info"), "np_online_id") as string;
             if (string.IsNullOrEmpty(onlineId)) return null;
+            country = (country ?? "").Trim().ToLowerInvariant();
+            if (country == "default") country = "us";
+            if (country.Length != 2 || country.Any(c => c < 'a' || c > 'z')) country = null;
             Dictionary<string, object> user;
             lock (usersLock)
             {
-                if (!users.TryGetValue(onlineId, out user))
+                bool newPlayer = !users.TryGetValue(onlineId, out user);
+                bool countryChanged = !newPlayer && country != null &&
+                    !string.Equals(Field(user, "country_code") as string, country, StringComparison.Ordinal);
+                if (newPlayer)
                 {
                     user = new Dictionary<string, object> {
                         { "user_id", Guid.NewGuid().ToString("N") }, { "np_account_id", AccountId(onlineId) },
-                        { "np_online_id", onlineId }, { "nick_name", onlineId }, { "country_code", "us" },
+                        { "np_online_id", onlineId }, { "nick_name", onlineId }, { "country_code", country ?? "us" },
                         { "driver_rating", 1 }, { "dr_point", 1000 }, { "sportsmanship_rating", 4 }, { "sr_point", 50000 },
                         { "manufacturer_id", 0 }, { "is_star_player", false }, { "is_valid_user", true } };
+                    log("GT7: new player " + onlineId);
+                }
+                else if (countryChanged)
+                {
+                    user = new Dictionary<string, object>(user);
+                    user["country_code"] = country;
+                }
+                if (newPlayer || countryChanged)
+                {
                     users[onlineId] = user;
                     File.WriteAllText(Path.Combine(directory, "users.json"), json.Serialize(users));
-                    log("GT7: new player " + onlineId);
                 }
             }
             log("GT7: " + onlineId + " signed in");

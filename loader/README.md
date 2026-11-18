@@ -69,6 +69,10 @@ configuration alias; this is unrelated to the required game title ID.
 
 ## Online
 
+Choose your country or region under **Settings → Account → Player flag**. Start GT7 again to
+apply the choice. The setting works offline without an account. RyGTServer builds with this
+feature also use it in online profiles.
+
 The **Account** page holds the online account: your online ID, joining a friend's server with their invite code, hosting your own, and signing out. Nothing asks for an account at start; Online on Play without one points to it. The **Online** page hosts GT7's online service on this PC (code in `Online.cs`).
 
 At start the launcher asks GitLab for the newest rygt-team/rygt7 release (in the background; the "Check for updates" box in Settings > Display turns it off). A newer one shows a notice and an **Update** button at the top right of the home view: it downloads the release zip, checks its SHA-256 (from the release notes) and every file against the package's manifest.json, moves the files it replaces to `update\backup-<old version>` and copies the new ones in, then restarts. Only files the package lists are written; `user\`, `shaders\`, the converted game and the .ini files never are. Settings > Display can roll the last update back (code in `Updater.cs`).

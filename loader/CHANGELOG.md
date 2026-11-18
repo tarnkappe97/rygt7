@@ -6,6 +6,10 @@ The version lives in `loader/Version.cs`. To release a change, bump
 `LauncherVersion.Value` there and add a section here with the same number;
 CI fails when the two disagree.
 
+## 0.1.8 - 2026-11-18
+
+* Add a player flag country or region picker under Settings > Account.
+
 ## 0.1.7 - 2026-11-16
 
 * FIX-GTS-271: GT7's online-service keys are no longer in ryGT7. RyGTServer reads them from your own

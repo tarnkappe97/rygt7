@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -90,6 +91,22 @@ namespace RyGT
         {
             string value;
             return ini.TryGetValue(key, out value) ? value : "";
+        }
+
+        public static List<KeyValuePair<string, string>> PlayerFlagOptions()
+        {
+            var countries = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (CultureInfo culture in CultureInfo.GetCultures(CultureTypes.SpecificCultures))
+            {
+                var region = new RegionInfo(culture.Name);
+                string code = region.TwoLetterISORegionName.ToLowerInvariant();
+                if (code.Length == 2 && code.All(c => c >= 'a' && c <= 'z'))
+                    countries[code] = region.EnglishName;
+            }
+            var options = new List<KeyValuePair<string, string>>
+                { new KeyValuePair<string, string>("", "Default") };
+            options.AddRange(countries.OrderBy(country => country.Value, StringComparer.CurrentCulture));
+            return options;
         }
 
         public static bool Enabled(string root)
@@ -1113,6 +1130,24 @@ namespace RyGT
             var statusButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0), BackColor = Color.Transparent };
             statusButtons.Controls.AddRange(new Control[] { signInButton, signOut });
             status.Controls.Add(statusButtons);
+
+            var profile = Section(page, "Player flag");
+            var options = OnlinePlay.PlayerFlagOptions();
+            var flag = new DarkComboBox {
+                DropDownStyle = ComboBoxStyle.DropDownList, Width = 300,
+                DisplayMember = "Value"
+            };
+            flag.Items.AddRange(options.Cast<object>().ToArray());
+            string country = OnlinePlay.Get(OnlinePlay.ReadIni(root), "player_country").ToLowerInvariant();
+            flag.SelectedIndex = Math.Max(0, options.FindIndex(option => option.Key == country));
+            flag.SelectionChangeCommitted += delegate
+            {
+                string selected = ((KeyValuePair<string, string>)flag.SelectedItem).Key;
+                OnlinePlay.WriteIni(root, new Dictionary<string, string>
+                    { { "player_country", selected.Length == 0 ? null : selected } });
+            };
+            profile.Controls.Add(flag);
+            profile.Controls.Add(Hint("Choose the country or region shown next to your name. Applies the next time you launch GT7."));
 
             var create = Section(page, "Join or host");
             var intro = Hint("Your account works on every server. Join a friend with their invite code, or host your own server.");

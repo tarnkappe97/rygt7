@@ -149,12 +149,12 @@ int APS5_VABI sceNpGetAccountAge(int req_id, int user_id, uint8_t* age) {
 
 int APS5_VABI sceNpGetAccountCountryA(int user_id, void* country_code) {
     (void)user_id;
-    if (!online()) return SCE_NP_ERROR_SIGNED_OUT;
+    const auto& country = RyGTOnline::Get().playerCountry;
+    if (!online() && country.empty()) return SCE_NP_ERROR_SIGNED_OUT;
     if (!country_code) return SCE_NP_ERROR_INVALID_ARGUMENT;
     auto* code = static_cast<NpCountryCode*>(country_code);
     std::memset(code, 0, sizeof(*code));
-    code->data[0] = 'u';
-    code->data[1] = 's';
+    std::memcpy(code->data, country.empty() ? "us" : country.data(), sizeof(code->data));
     return 0;
 }
 

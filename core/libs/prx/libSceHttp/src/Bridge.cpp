@@ -461,10 +461,16 @@ int Send(int req_id, const void* post_data, std::size_t size) {
     text += "Host: " + host + (port != defaultPort(scheme) ? ":" + std::to_string(port) : "") + "\r\n";
     text += "X-RyGT-Scheme: " + scheme + "\r\n";
     text += "X-RyGT-Online-Id: " + config.onlineId + "\r\n";
+    if (!direct && (request->target == "/auth/sign_in" ||
+                    request->target.starts_with("/auth/sign_in?"))) {
+        text += "X-RyGT-Player-Country: " +
+                (config.playerCountry.empty() ? "default" : config.playerCountry) + "\r\n";
+    }
     if (!userAgent.empty()) text += "User-Agent: " + userAgent + "\r\n";
     for (const auto& header : headers) {
         if (equalsIgnoreCase(header.name, "Host") || equalsIgnoreCase(header.name, "Connection") ||
-            equalsIgnoreCase(header.name, "Content-Length") || equalsIgnoreCase(header.name, "Transfer-Encoding")) {
+            equalsIgnoreCase(header.name, "Content-Length") || equalsIgnoreCase(header.name, "Transfer-Encoding") ||
+            equalsIgnoreCase(header.name, "X-RyGT-Player-Country")) {
             continue;
         }
         text += header.name + ": " + header.value + "\r\n";

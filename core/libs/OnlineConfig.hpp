@@ -11,7 +11,9 @@
 // traffic is sent as plain HTTP to the configured RyGTServer, which can run on this machine or a
 // friend's.
 //
-// RyGT.ini (next to GTSport.exe) keys, each overridable by an environment variable:
+// RyGT.ini (next to GT7.exe) keys:
+//   player_country=tr                                (local and multiplayer profile country)
+// The remaining keys can also be overridden by the indicated environment variables:
 //   online=1                       RYGT_ONLINE
 //   online_id=RyGTPlayer           RYGT_ONLINE_ID     (PSN online ID, 3-16 characters)
 //   online_server=127.0.0.1:7890   RYGT_ONLINE_SERVER (RyGTServer host[:port])
@@ -22,6 +24,7 @@ namespace RyGTOnline {
 struct Config {
     bool enabled = false;
     std::string onlineId = "RyGTPlayer";
+    std::string playerCountry;  // ISO alpha-2, lowercase. An empty value uses the default.
     std::string serverHost = "127.0.0.1";
     std::uint16_t serverPort = 7890;
     std::string address;  // online_address, empty when not set
@@ -41,6 +44,13 @@ inline void Apply(Config& config, std::string_view key, std::string_view value) 
         config.enabled = value == "1" || value == "true" || value == "yes" || value == "on";
     } else if (key == "online_id") {
         if (value.size() >= 3) config.onlineId = std::string(value.substr(0, 16));
+    } else if (key == "player_country" && value.size() == 2) {
+        std::string code(value);
+        for (char& letter : code) {
+            if (letter >= 'A' && letter <= 'Z') letter += 'a' - 'A';
+            if (letter < 'a' || letter > 'z') return;
+        }
+        config.playerCountry = code;
     } else if (key == "online_address") {
         config.address = std::string(value);
     } else if (key == "online_server" && !value.empty()) {
