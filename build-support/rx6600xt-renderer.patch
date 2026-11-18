@@ -1,0 +1,590 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5a53c19..fa0ae90 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1160,6 +1160,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
+                src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
+                src/video_core/renderer_vulkan/vk_compute_pipeline.h
+                src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
++               src/video_core/renderer_vulkan/vk_pipeline_binary.cpp
+                src/video_core/renderer_vulkan/vk_graphics_pipeline.h
+                src/video_core/renderer_vulkan/vk_instance.cpp
+                src/video_core/renderer_vulkan/vk_instance.h
+diff --git a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+index a6bd242..65e6429 100644
+--- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
++++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+@@ -37,6 +37,7 @@
+ #include "video_core/renderer_vulkan/shader_object_cache.h"
+ #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
++#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+ #include "video_core/renderer_vulkan/vk_shader_util.h"
+ 
+@@ -1037,6 +1038,14 @@ GraphicsPipeline::GraphicsPipeline(
+     };
+ 
+     const auto create_start = std::chrono::steady_clock::now();
++    if (auto ready = LoadOrCaptureGraphicsPipeline(device, pipeline_info)) {
++        pipeline = std::move(ready);
++        SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
++        LOG_INFO(Render_Vulkan, "Graphics pipeline {}: binary cache path {:.1f} ms", debug_str,
++                 std::chrono::duration<double, std::milli>(
++                     std::chrono::steady_clock::now() - create_start).count());
++        return;
++    }
+     // FIX-057: tessellated pipelines are compiled whole, not from libraries: on GT Sport's race
+     // summary their library compiles (with link-time optimization info kept) took the process
+     // from 11 GB to over 50 GB with only two running. -DisablePerf 80 builds them from libraries.
+diff --git a/src/video_core/renderer_vulkan/vk_instance.cpp b/src/video_core/renderer_vulkan/vk_instance.cpp
+index 9e00020..59ceace 100644
+--- a/src/video_core/renderer_vulkan/vk_instance.cpp
++++ b/src/video_core/renderer_vulkan/vk_instance.cpp
+@@ -19,6 +19,7 @@
+ #include "sdl_window.h"
+ #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
++#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
+ #include "video_core/renderer_vulkan/single_sample_barycentric.h"
+ #include "video_core/renderer_vulkan/vk_platform.h"
+ #ifdef RYTY_GPU
+@@ -341,6 +342,13 @@ bool Instance::CreateDevice() {
+     vk12_props = properties_chain.get<vk::PhysicalDeviceVulkan12Properties>();
+     vk13_props = properties_chain.get<vk::PhysicalDeviceVulkan13Properties>();
+     push_descriptor_props = properties_chain.get<vk::PhysicalDevicePushDescriptorPropertiesKHR>();
++    // The RX 6600 XT loses the device on the first dispatch with pushed descriptors.
++    // A zero limit selects allocated sets for draws, dispatches and compute recipe replay.
++    const bool rx6600xt = IsAmdLegacyShaderCompiler() && GetModelName() == "AMD Radeon RX 6600 XT";
++    if (rx6600xt) {
++        push_descriptor_props.maxPushDescriptors = 0;
++        LOG_INFO(Render_Vulkan, "Using allocated descriptor sets on the RX 6600 XT");
++    }
+     if (const auto simulated = GetSimulatedGpu(); simulated != SimulatedGpu::None) {
+         // AMD-300: before RDNA 3 only compute takes a required subgroup size, and GCN runs 64 only.
+         if (Simulates("sub")) {
+@@ -403,6 +411,17 @@ bool Instance::CreateDevice() {
+     // Optional
+     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
++    vk::PhysicalDevicePipelineBinaryFeaturesKHR binary_features{};
++    const char* binaries = std::getenv("RYGT_PIPELINE_BINARIES");
++    if (rx6600xt && maintenance_5 && DriverCacheFileEnabled() && !(binaries && binaries[0] == '0') &&
++        std::ranges::find(available_extensions, VK_KHR_PIPELINE_BINARY_EXTENSION_NAME) !=
++            available_extensions.end()) {
++        const auto features = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2,
++                                                            vk::PhysicalDevicePipelineBinaryFeaturesKHR>();
++        if (features.get<vk::PhysicalDevicePipelineBinaryFeaturesKHR>().pipelineBinaries) {
++            binary_features.pipelineBinaries = add_extension(VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
++        }
++    }
+     // PERF-210 (RYGT_ANTI_LAG=1): AMD Anti-Lag, see AntiLagUpdate.
+     if (const char* env = std::getenv("RYGT_ANTI_LAG"); env && env[0] == '1') {
+         const auto chain = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2,
+@@ -485,10 +504,6 @@ bool Instance::CreateDevice() {
+                             d3.extendedDynamicState3DepthClipEnable &&
+                             d3.extendedDynamicState3DepthClipNegativeOneToOne &&
+                             d3.extendedDynamicState3ProvokingVertexMode;
+-        if (states && feature_chain.get<vk::PhysicalDeviceShaderObjectFeaturesEXT>().shaderObject &&
+-            vertex_input_dynamic_state && graphics_pipeline_library) {
+-            shader_object = add_extension(VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
+-        }
+         // SO-003: tessellated pipelines too. VK_EXT_shader_object itself provides the patch
+         // control point and domain origin commands its shaders need (AMD's driver reports no
+         // extendedDynamicState2PatchControlPoints feature, which only pipelines need).
+@@ -499,17 +514,20 @@ bool Instance::CreateDevice() {
+         // SO-006: VK_KHR_maintenance11's VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_KHR lets shader
+         // objects use the independent-sets layouts the pipelines bind their sets with (newer
+         // than these headers: enabled by its name, feature structure type and flag value).
+-        if (shader_object) {
+-            if (add_extension("VK_KHR_maintenance11")) {
++        if (states && feature_chain.get<vk::PhysicalDeviceShaderObjectFeaturesEXT>().shaderObject &&
++            vertex_input_dynamic_state && graphics_pipeline_library) {
++            if (std::ranges::find(available_extensions, "VK_KHR_maintenance11") !=
++                available_extensions.end()) {
+                 VkPhysicalDeviceFeatures2 maintenance_features{
+                     .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                     .pNext = &maintenance11_features,
+                 };
+                 VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2(
+                     static_cast<VkPhysicalDevice>(physical_device), &maintenance_features);
+-                shader_independent_sets = maintenance11_features.maintenance11 != VK_FALSE;
++                shader_independent_sets = maintenance11_features.maintenance11 != VK_FALSE &&
++                                          add_extension("VK_KHR_maintenance11");
+             }
+-            shader_object = shader_independent_sets;
++            shader_object = shader_independent_sets && add_extension(VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
+         }
+         const char* tess = std::getenv("RYGT_SHADER_OBJECT_TESS");
+         shader_object_tessellation = shader_object && !(tess && tess[0] == '0');
+@@ -1039,6 +1057,11 @@ bool Instance::CreateDevice() {
+         coverage_reduction_features.pNext = const_cast<void*>(create_info.pNext);
+         create_info.pNext = &coverage_reduction_features;
+     }
++    if (binary_features.pipelineBinaries) {
++        auto& create_info = device_chain.get<vk::DeviceCreateInfo>();
++        binary_features.pNext = const_cast<void*>(create_info.pNext);
++        create_info.pNext = &binary_features;
++    }
+     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
+     if (device_result != vk::Result::eSuccess) {
+         LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+index 0aff1b7..49e62a3 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -52,6 +52,7 @@
+ #include "video_core/renderer_vulkan/spirv_check.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
++#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+ #include "video_core/renderer_vulkan/vk_shader_util.h"
+ #include "video_core/renderer_vulkan/vk_rasterizer.h"
+@@ -590,12 +591,61 @@ public:
+         cv.notify_all();
+     }
+ 
+-    std::future<StoredListing> List(u64 pgm_hash) {
++    // Start reading the first menu programs before the guest issues its first draw.
++    // The file contains hints only. The normal shader store still validates each permutation.
++    void PrimeStartupPrograms() {
++        const auto& serial = Common::Singleton<Common::ElfInfo>::Instance()->GameSerial();
++        startup_file = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
++                       fmt::format("{}.startup-shaders", serial);
++        std::ifstream in{startup_file, std::ios::binary};
++        u64 hash;
++        size_t queued = 0;
++        while (previous_startup.size() < MaxStartupPrograms &&
++               in.read(reinterpret_cast<char*>(&hash), sizeof(hash))) {
++            previous_startup.push_back(hash);
++            if (!owner.pending_listings.contains(hash) &&
++                Storage::DataBase::Instance().Exists(Storage::BlobType::ShaderMeta,
++                    fmt::format("{:#018x}", HashCombine(hash, u64{0})))) {
++                owner.pending_listings.emplace(hash, List(hash, true));
++                ++queued;
++            }
++        }
++        LOG_INFO(Render_Vulkan, "Queued {} stored startup shader programs before first use", queued);
++    }
++
++    // Called once per new program under the lookup lock. Short launches keep the previous list.
++    void RememberStartupProgram(u64 hash) {
++        if (startup_file.empty() || startup.size() >= MaxStartupPrograms) {
++            return;
++        }
++        startup.push_back(hash);
++        if (startup.size() != MaxStartupPrograms || startup == previous_startup) {
++            return;
++        }
++        auto temporary = startup_file;
++        temporary += fmt::format(".{}.tmp", std::chrono::steady_clock::now().time_since_epoch().count());
++        std::error_code ec;
++        {
++            std::ofstream out{temporary, std::ios::binary};
++            out.write(reinterpret_cast<const char*>(startup.data()), startup.size() * sizeof(u64));
++            out.close();
++            if (!out) {
++                std::filesystem::remove(temporary, ec);
++                return;
++            }
++        }
++        std::filesystem::rename(temporary, startup_file, ec);
++        if (ec) {
++            std::filesystem::remove(temporary, ec);
++        }
++    }
++
++    std::future<StoredListing> List(u64 pgm_hash, bool ahead = false) {
+         Job job{.pgm_hash = pgm_hash};
+         auto listing = job.promise.get_future();
+         {
+             std::scoped_lock lk{mutex};
+-            queue.push_back(std::move(job));
++            (ahead ? startup_queue : queue).push_back(std::move(job));
+         }
+         cv.notify_one();
+         return listing;
+@@ -604,6 +654,10 @@ public:
+     std::atomic<u64> files_read_ahead{};
+ 
+ private:
++    static constexpr size_t MaxStartupPrograms = 64;
++    std::filesystem::path startup_file;
++    std::vector<u64> previous_startup;
++    std::vector<u64> startup;
+     // PERF-GT7-118: the module of a stored permutation, made here from the SPIR-V just read
+     // instead of on the command thread when a draw matches it: GT7's first race frame matched
+     // ~700 stored programs and opened, read and turned each one into a module there, one after
+@@ -667,12 +721,13 @@ private:
+             Job job;
+             {
+                 std::unique_lock lk{mutex};
+-                cv.wait(lk, stop, [this] { return !queue.empty(); });
+-                if (queue.empty()) {
++                cv.wait(lk, stop, [this] { return !queue.empty() || !startup_queue.empty(); });
++                auto& next = queue.empty() ? startup_queue : queue;
++                if (next.empty()) {
+                     continue;
+                 }
+-                job = std::move(queue.front());
+-                queue.pop_front();
++                job = std::move(next.front());
++                next.pop_front();
+             }
+             StoredListing listing = ReadStoredListing(job.pgm_hash);
+             std::vector<std::pair<std::string, u64>> spv_names;
+@@ -695,6 +750,7 @@ private:
+     std::mutex mutex;
+     std::condition_variable_any cv;
+     std::deque<Job> queue;
++    std::deque<Job> startup_queue;
+     std::vector<std::jthread> threads;
+ };
+ 
+@@ -2331,6 +2387,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
+             const char* readers_env = std::getenv("RYGT_STORE_READERS");
+             if (use_stored_shaders && !(readers_env && readers_env[0] == '0')) {
+                 store_readers = std::make_unique<StoreReaders>(8, *this);
++                store_readers->PrimeStartupPrograms();
+                 store_stats.since = std::chrono::steady_clock::now();
+             }
+         }
+@@ -2392,7 +2449,7 @@ PipelineCache::~PipelineCache() {
+ // reaches the exit-time save): each session adds the pipelines of the cars and tracks it met.
+ // PERF-167: the driver cache file's size limit, from the launcher's Graphics page
+ // (RYGT_DRIVER_CACHE_MAX_MB): 0 turns the file off, -1 has no limit; 2 GB by default.
+-static u64 DriverCacheMaxBytes() {
++u64 DriverCacheMaxBytes() {
+     static const u64 limit = [] {
+         const char* env = std::getenv("RYGT_DRIVER_CACHE_MAX_MB");
+         if (!env || !*env) {
+@@ -2404,7 +2461,7 @@ static u64 DriverCacheMaxBytes() {
+     return limit;
+ }
+ 
+-static bool DriverCacheFileEnabled() {
++bool DriverCacheFileEnabled() {
+ #ifdef RYTY_GPU
+     static const bool enabled = [] {
+         const char* env = std::getenv("RYGT_DRIVER_CACHE");
+@@ -2683,7 +2740,9 @@ void PipelineCache::MaybeSaveDriverCache() {
+     // PERF-167: a big cache is copied out whole each save, so it is saved less often as it
+     // grows: every 45 s up to 256 MB, then 45 s more per further 256 MB (2 GB: every 6 min).
+     const u64 size_mb = driver_cache_bytes.load(std::memory_order_relaxed) >> 20;
+-    const auto interval = 45s * std::max<u64>(1, (size_mb + 255) / 256);
++    // Checkpoint the first batch promptly, even when an older cache is already large.
++    const u64 periods = pipelines_at_driver_save == 0 ? 1 : std::max<u64>(1, (size_mb + 255) / 256);
++    const auto interval = 45s * periods;
+     // PERF-GT7-108: once the compile pack's start-up compile asked for a save, at the next look.
+     if (driver_cache_save_requested.exchange(false, std::memory_order_acq_rel) ||
+         (num_new_pipelines - pipelines_at_driver_save >= 32 && since >= interval)) {
+@@ -3611,6 +3670,7 @@ const GraphicsPipeline* PipelineCache::PipelineForCurrentKey(const DrawIndirectP
+                 sdata = stored->sdata;
+                 it.value() = std::move(stored->pipeline);
+                 ++async_stats.installed;
++                ++num_new_pipelines; // Include worker builds in periodic and exit saves.
+                 return it->second.get();
+             }
+             if (!force_wait && !LegacyWaits() && !WritesMemory(S().infos) &&
+@@ -4882,6 +4942,11 @@ void PipelineCache::ReportAsyncPipelines(std::chrono::steady_clock::time_point n
+     if (now - async_stats.since < std::chrono::seconds{2}) {
+         return;
+     }
++#ifdef RYTY_GPU
++    // The menu may keep using the same pipelines after a burst of new builds.
++    // Check the deadline here as well as on a cache miss.
++    MaybeSaveDriverCache();
++#endif
+     if (async_stats.deferred + async_stats.installed + async_stats.skipped_draws +
+             async_stats.skipped_translating !=
+         0) {
+@@ -6138,6 +6203,9 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
+     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
+     if (new_program) {
+         it_pgm.value() = std::make_unique<Program>();
++        if (store_readers) {
++            store_readers->RememberStartupProgram(params.hash);
++        }
+         if (use_stored_shaders) {
+             if (const auto pending = pending_listings.find(params.hash);
+                 pending != pending_listings.end()) {
+diff --git a/src/video_core/rygt_switches.cpp b/src/video_core/rygt_switches.cpp
+index ad16a6b..139318b 100644
+--- a/src/video_core/rygt_switches.cpp
++++ b/src/video_core/rygt_switches.cpp
+@@ -37,6 +37,7 @@ RYGT_SWITCH_EXPORT extern const std::size_t RyGT_SwitchDescriptionCount;
+ RYGT_SWITCH_EXPORT const char* const RyGT_SwitchDescriptions[] = {
+     // Shader objects & caches
+     "RYGTSW1|RYGT_COMPILE_PACK|flag|Shader objects & caches|off|1 = on (needs shader objects and RYGT_SO_CACHE on)|At start, compiles in the background the compile-pack recipes missing from this driver's cache, e.g. after a driver update. Uses all cores.",
++    "RYGTSW1|RYGT_PIPELINE_BINARIES|flag|Shader objects & caches|on for RX 6600 XT with AMD legacy compiler|0 = off|Keeps finished graphics pipelines for this driver and restores them on restart. Requires the driver cache setting.",
+     "RYGTSW1|RYGT_DRIVER_CACHE|flag|Shader objects & caches|on|0 = off|Keeps the driver's pipeline cache file between runs; 0 turns it off so every start compiles again.",
+     "RYGTSW1|RYGT_DRIVER_CACHE_MAX_MB|int|Shader objects & caches|2048 (built-in 2 GB budget)|megabytes; 0 = file off, -1 = no limit; a larger file is not loaded|Size limit of the driver pipeline cache file in MB (PERF-167); 0 turns the file off, -1 removes the limit.",
+     "RYGTSW1|RYGT_DRIVER_CACHE_RESTART|flag|Shader objects & caches|on|0 = off (the oversized cache is kept and never saved again)|When the driver pipeline cache outgrows its size limit, its file is dropped and the next launch starts a new one (FIX-GT7-050).",
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_binary.h b/src/video_core/renderer_vulkan/vk_pipeline_binary.h
+new file mode 100644
+index 0000000..c946647
+--- /dev/null
++++ b/src/video_core/renderer_vulkan/vk_pipeline_binary.h
+@@ -0,0 +1,12 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include "common/types.h"
++#include "video_core/renderer_vulkan/vk_common.h"
++
++namespace Vulkan {
++bool DriverCacheFileEnabled();
++u64 DriverCacheMaxBytes();
++vk::UniquePipeline LoadOrCaptureGraphicsPipeline(vk::Device device,
++                                                 vk::GraphicsPipelineCreateInfo info);
++} // namespace Vulkan
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_binary.cpp b/src/video_core/renderer_vulkan/vk_pipeline_binary.cpp
+new file mode 100644
+index 0000000..41caa21
+--- /dev/null
++++ b/src/video_core/renderer_vulkan/vk_pipeline_binary.cpp
+@@ -0,0 +1,243 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <span>
++#include <vector>
++#include <fmt/ranges.h>
++#include <xxhash.h>
++
++#include "common/elf_info.h"
++#include "common/logging/log.h"
++#include "common/path_util.h"
++#include "common/singleton.h"
++#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
++
++namespace Vulkan {
++namespace {
++namespace fs = std::filesystem;
++constexpr size_t MaxFileBytes = 4u << 20;
++constexpr u64 MaxDirectoryBytes = 256ull << 20;
++
++std::string DriverKey(vk::Device device, const VkPipelineCreateInfoKHR* info) {
++    VkPipelineBinaryKeyKHR key{VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR};
++    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPipelineKeyKHR(device, info, &key) != VK_SUCCESS ||
++        !key.keySize || key.keySize > sizeof(key.key)) {
++        return {};
++    }
++    return fmt::format("{:02x}", fmt::join(std::span(key.key, key.keySize), ""));
++}
++
++// Each file contains a checksum followed by a length-prefixed driver key and its binary.
++// Both the device-wide key and the pipeline key must match before any data goes to Vulkan.
++std::vector<u8> ReadBinary(const fs::path& file) {
++    std::ifstream in{file, std::ios::binary | std::ios::ate};
++    const std::streamoff size = in.tellg();
++    if (size < 11 || size > MaxFileBytes) {
++        return {};
++    }
++    in.seekg(0);
++    u64 checksum;
++    std::vector<u8> bytes(size_t(size) - sizeof(checksum));
++    if (!in.read(reinterpret_cast<char*>(&checksum), sizeof(checksum)) ||
++        !in.read(reinterpret_cast<char*>(bytes.data()), bytes.size()) || bytes[0] == 0 ||
++        bytes[0] > VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR || bytes.size() <= 1u + bytes[0] ||
++        checksum != XXH3_64bits(bytes.data(), bytes.size())) {
++        return {};
++    }
++    return bytes;
++}
++
++class DiskBudget {
++public:
++    bool HasRoom(const fs::path& dir, size_t bytes) {
++        std::scoped_lock lk{mutex};
++        return HasRoomLocked(dir, bytes);
++    }
++
++    bool Save(const fs::path& file, const std::vector<u8>& bytes) {
++        std::scoped_lock lk{mutex};
++        const size_t size = bytes.size() + sizeof(u64);
++        const auto dir = file.parent_path();
++        if (!HasRoomLocked(dir, size)) {
++            return false;
++        }
++        std::error_code ec;
++        fs::create_directories(dir, ec);
++        if (ec) {
++            return false;
++        }
++        auto temporary = file;
++        temporary +=
++            fmt::format(".{}.tmp", std::chrono::steady_clock::now().time_since_epoch().count());
++        std::ofstream out{temporary, std::ios::binary};
++        const u64 checksum = XXH3_64bits(bytes.data(), bytes.size());
++        out.write(reinterpret_cast<const char*>(&checksum), sizeof(checksum));
++        out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
++        out.close();
++        const auto old = fs::file_size(file, ec);
++        const auto replaced = ec ? 0 : old;
++        if (out) {
++            fs::rename(temporary, file, ec);
++            if (!ec) {
++                auto& used = sizes.at(dir);
++                used = used - std::min<u64>(used, replaced) + size;
++                return true;
++            }
++        }
++        fs::remove(temporary, ec);
++        return false;
++    }
++
++private:
++    bool HasRoomLocked(const fs::path& dir, size_t bytes) {
++        auto [it, inserted] = sizes.try_emplace(dir, 0);
++        if (inserted) {
++            std::error_code ec;
++            fs::directory_iterator entries{dir, ec};
++            for (; !ec && entries != fs::directory_iterator{}; entries.increment(ec)) {
++                if (entries->path().extension() == ".bin") {
++                    std::error_code size_ec;
++                    const auto size = entries->file_size(size_ec);
++                    if (!size_ec) {
++                        it->second += size;
++                    }
++                }
++            }
++        }
++        const auto limit = std::min(DriverCacheMaxBytes(), MaxDirectoryBytes);
++        return bytes <= limit && it->second <= limit - bytes;
++    }
++
++    std::mutex mutex;
++    std::map<fs::path, u64> sizes;
++};
++
++struct BinaryHandle {
++    vk::Device device;
++    VkPipelineBinaryKHR binary{};
++    ~BinaryHandle() {
++        if (binary) {
++            VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipelineBinaryKHR(device, binary, nullptr);
++        }
++    }
++};
++
++vk::UniquePipeline Restore(vk::Device device, vk::GraphicsPipelineCreateInfo info,
++                           std::vector<u8>& bytes) {
++    VkPipelineBinaryKeyKHR key{VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR};
++    key.keySize = bytes[0];
++    std::memcpy(key.key, bytes.data() + 1, key.keySize);
++    const size_t offset = 1 + key.keySize;
++    const VkPipelineBinaryDataKHR data{bytes.size() - offset, bytes.data() + offset};
++    const VkPipelineBinaryKeysAndDataKHR input{1, &key, &data};
++    VkPipelineBinaryCreateInfoKHR source{VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR};
++    source.pKeysAndDataInfo = &input;
++    BinaryHandle binary{device};
++    VkPipelineBinaryHandlesInfoKHR handles{VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR,
++                                           nullptr, 1, &binary.binary};
++    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreatePipelineBinariesKHR(device, &source, nullptr,
++                                                                  &handles) != VK_SUCCESS ||
++        !binary.binary) {
++        return {};
++    }
++    VkPipelineBinaryInfoKHR restore{VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR, info.pNext, 1,
++                                    &binary.binary};
++    info.pNext = &restore;
++    auto restored = device.createGraphicsPipelineUnique({}, info);
++    return restored.result == vk::Result::eSuccess ? std::move(restored.value)
++                                                   : vk::UniquePipeline{};
++}
++
++std::vector<u8> Extract(vk::Device device, vk::Pipeline pipeline) {
++    auto& api = VULKAN_HPP_DEFAULT_DISPATCHER;
++    VkPipelineBinaryCreateInfoKHR source{VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR};
++    source.pipeline = pipeline;
++    BinaryHandle binary{device};
++    VkPipelineBinaryHandlesInfoKHR handles{VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR,
++                                           nullptr, 1, &binary.binary};
++    if (api.vkCreatePipelineBinariesKHR(device, &source, nullptr, &handles) != VK_SUCCESS ||
++        handles.pipelineBinaryCount != 1 || !binary.binary) {
++        return {};
++    }
++    VkPipelineBinaryDataInfoKHR data{VK_STRUCTURE_TYPE_PIPELINE_BINARY_DATA_INFO_KHR, nullptr,
++                                     binary.binary};
++    VkPipelineBinaryKeyKHR key{VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR};
++    size_t size = 0;
++    if (api.vkGetPipelineBinaryDataKHR(device, &data, &key, &size, nullptr) != VK_SUCCESS ||
++        !size || size > MaxFileBytes - sizeof(u64) - 1 - sizeof(key.key) || !key.keySize ||
++        key.keySize > sizeof(key.key)) {
++        return {};
++    }
++    const auto key_size = key.keySize;
++    std::vector<u8> bytes(1 + key_size + size);
++    if (api.vkGetPipelineBinaryDataKHR(device, &data, &key, &size, bytes.data() + 1 + key_size) !=
++            VK_SUCCESS ||
++        key.keySize != key_size || size == 0) {
++        return {};
++    }
++    bytes.resize(1 + key_size + size);
++    bytes[0] = static_cast<u8>(key_size);
++    std::memcpy(bytes.data() + 1, key.key, key_size);
++    return bytes;
++}
++} // namespace
++
++vk::UniquePipeline LoadOrCaptureGraphicsPipeline(vk::Device device,
++                                                 vk::GraphicsPipelineCreateInfo info) {
++    if (!VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPipelineKeyKHR) {
++        return {};
++    }
++    VkPipelineCreateInfoKHR query{VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR, &info};
++    const auto global = DriverKey(device, nullptr);
++    const auto key = DriverKey(device, &query);
++    if (global.empty() || key.empty()) {
++        return {};
++    }
++    const auto& serial = Common::Singleton<Common::ElfInfo>::Instance()->GameSerial();
++    const auto dir = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
++                     fmt::format("{}.graphics-binaries", serial) / global;
++    const auto file = dir / (key + ".bin");
++    auto bytes = ReadBinary(file);
++    if (!bytes.empty()) {
++        if (auto ready = Restore(device, info, bytes)) {
++            static std::atomic<u32> restored{};
++            const u32 n = ++restored;
++            if (n == 1 || n % 64 == 0) {
++                LOG_INFO(Render_Vulkan, "Restored {} compiled graphics pipelines from disk", n);
++            }
++            return ready;
++        }
++    }
++    static DiskBudget budget;
++    if (!budget.HasRoom(dir, 1)) {
++        return {};
++    }
++    VkPipelineCreateFlags2CreateInfoKHR flags{
++        VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR, info.pNext,
++        VkPipelineCreateFlags(info.flags) | VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR};
++    info.pNext = &flags;
++    auto captured = device.createGraphicsPipelineUnique({}, info);
++    if (captured.result != vk::Result::eSuccess) {
++        return {};
++    }
++    bytes = Extract(device, *captured.value);
++    VkReleaseCapturedPipelineDataInfoKHR release{
++        VK_STRUCTURE_TYPE_RELEASE_CAPTURED_PIPELINE_DATA_INFO_KHR};
++    release.pipeline = *captured.value;
++    VULKAN_HPP_DEFAULT_DISPATCHER.vkReleaseCapturedPipelineDataKHR(device, &release, nullptr);
++    if (!bytes.empty() && budget.Save(file, bytes)) {
++        static std::atomic<u32> saved{};
++        const u32 n = ++saved;
++        if (n == 1 || n % 64 == 0) {
++            LOG_INFO(Render_Vulkan, "Saved {} compiled graphics pipelines to disk", n);
++        }
++    }
++    return std::move(captured.value);
++}
++} // namespace Vulkan

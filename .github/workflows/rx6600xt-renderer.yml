@@ -1,0 +1,35 @@
+name: Build RX 6600 XT renderer
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  renderer:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          git config --global core.autocrlf input
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: RyGT-Team/shadgt7
+          ref: 3e2b8d76d2c38b5da09aadf5b8be7ff76d7f6d64
+          path: renderer
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - shell: pwsh
+        run: |
+          . ./ci/rygt7/setup-tools.ps1
+          ./build-support/build-rx6600xt-renderer.ps1 -RendererSource renderer -BuildDirectory C:/rygt7-ci/renderer-build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rx6600xt-renderer
+          path: C:/rygt7-ci/renderer-build/libSceVideoOut.prx
+          if-no-files-found: error

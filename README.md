@@ -9,6 +9,34 @@ so friends can sign in, open lobby rooms and race each other (see [Online play](
 
 ## Download and set up
 
+### Radeon RX 6600 XT on Windows
+
+This fork includes a renderer patch for the November 16, 2026 release. It selects allocated
+Vulkan descriptor sets on the RX 6600 XT with AMD's legacy compiler. It saves finished graphics
+pipelines for reuse on this GPU and driver, checkpoints background builds, and loads previously
+used menu shaders ahead on restart. A new car or track can still need a first compile.
+The finished binaries live under `shaders/<title>.graphics-binaries`. Each driver cache directory
+uses up to 256 MiB or the configured driver-cache limit, whichever is smaller. The Advanced
+switch `RYGT_PIPELINE_BINARIES=0` selects the original pipeline-building path.
+
+The fork's **Build RX 6600 XT renderer** workflow produces a downloadable `rx6600xt-renderer`
+artifact containing the replacement file. To build it locally, open an x64 Visual Studio
+developer PowerShell with Git, CMake, Ninja, and LLVM
+23.1.3 on PATH. From this repository run the following commands.
+
+```powershell
+git clone https://github.com/RyGT-Team/shadgt7.git renderer
+git -C renderer checkout --detach 3e2b8d76d2c38b5da09aadf5b8be7ff76d7f6d64
+git -C renderer submodule update --init --recursive
+./build-support/build-rx6600xt-renderer.ps1 -RendererSource renderer -BuildDirectory renderer-build
+```
+
+Close the game, back up `libs/libSceVideoOut.prx` from the installed release, then replace it
+with `renderer-build/libSceVideoOut.prx` and launch RyGT7 normally. Keep the existing
+`shaders` folder so the renderer can reuse it.
+
+### Base release
+
 Download the Windows archive from [Releases](https://gitlab.com/rygt-team/rygt7/-/releases).
 Extract the whole archive to a writable folder and run **RyGT7.exe**.
 
