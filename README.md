@@ -20,7 +20,8 @@ uses up to 256 MiB or the configured driver-cache limit, whichever is smaller. T
 switch `RYGT_PIPELINE_BINARIES=0` selects the original pipeline-building path.
 
 The fork's **Build RX 6600 XT renderer** workflow produces a downloadable `rx6600xt-renderer`
-artifact containing the replacement file. To build it locally, open an x64 Visual Studio
+artifact with the renderer and the NP library that reads the player flag in offline mode.
+To build them locally, open an x64 Visual Studio
 developer PowerShell with Git, CMake, Ninja, and LLVM
 23.1.3 on PATH. From this repository run the following commands.
 
@@ -31,9 +32,9 @@ git -C renderer submodule update --init --recursive
 ./build-support/build-rx6600xt-renderer.ps1 -RendererSource renderer -BuildDirectory renderer-build
 ```
 
-Close the game, back up `libs/libSceVideoOut.prx` from the installed release, then replace it
-with `renderer-build/libSceVideoOut.prx` and launch RyGT7 normally. Keep the existing
-`shaders` folder so the renderer can reuse it.
+Close the game and back up `libSceVideoOut.prx` and `libSceNpAuth.prx` from the installed
+release's `libs` folder. Copy both files from `renderer-build` into that folder and launch
+RyGT7 normally. Keep the existing `shaders` folder so the renderer can reuse it.
 
 ### Base release
 

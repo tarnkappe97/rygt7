@@ -651,3 +651,99 @@ index eed1520..50cbe37 100644
      game_info.app_ver = "01.69";
      game_info.firmware_ver = 0x05050000;
      game_info.raw_firmware_ver = 0x05050000;
+diff --git a/src/core/libraries/np/np_manager.cpp b/src/core/libraries/np/np_manager.cpp
+index ef468cc..66c5a3c 100644
+--- a/src/core/libraries/np/np_manager.cpp
++++ b/src/core/libraries/np/np_manager.cpp
+@@ -21,6 +21,10 @@
+ #include "core/user_settings.h"
+ #include "np_handler.h"
+ 
++#ifdef RYTY_NP_LIBRARY
++#include "common/ryty_config.h"
++#endif
++
+ namespace Libraries::Np::NpManager {
+ 
+ static bool g_shadnet_enabled = false;
+@@ -49,9 +53,60 @@ struct NpRequest {
+     s32 result;
+ };
+ 
++static std::string_view ConfiguredPlayerCountry(s32 user_id) {
++#ifdef RYTY_NP_LIBRARY
++    const User* player = UserManagement.GetUserByID(user_id);
++    if (!player || player->player_index != 1) {
++        return {};
++    }
++    static const std::string country = []() -> std::string {
++        const auto ini = Common::ReadFileW(Common::RytyExeDirW() + L"RyGT.ini");
++        const auto trim = [](std::string_view text) {
++            const auto start = text.find_first_not_of(" \t\r");
++            return start == text.npos ? std::string_view{} :
++                text.substr(start, text.find_last_not_of(" \t\r") - start + 1);
++        };
++        std::string value;
++        for (size_t start = 0; start < ini.size();) {
++            const auto end = ini.find('\n', start);
++            std::string_view line(ini.data() + start,
++                                  (end == ini.npos ? ini.size() : end) - start);
++            if (start == 0 && line.starts_with("\xEF\xBB\xBF")) {
++                line.remove_prefix(3);
++            }
++            const auto equals = line.find('=');
++            if (equals != line.npos && trim(line.substr(0, equals)) == "player_country") {
++                value = trim(line.substr(equals + 1));
++            }
++            start = end == ini.npos ? ini.size() : end + 1;
++        }
++        if (value.size() != 2) {
++            return {};
++        }
++        for (char& letter : value) {
++            if (letter >= 'A' && letter <= 'Z') {
++                letter += 'a' - 'A';
++            }
++            if (letter < 'a' || letter > 'z') {
++                return {};
++            }
++        }
++        return value;
++    }();
++    return country;
++#else
++    return {};
++#endif
++}
++
+ static void FillCountryCodeFromProfile(Libraries::UserService::OrbisUserServiceUserId user_id,
+                                        OrbisNpCountryCode* out) {
+     std::memset(out, 0, sizeof(OrbisNpCountryCode));
++    if (const auto selected = ConfiguredPlayerCountry(user_id); !selected.empty()) {
++        std::memcpy(out->country_code, selected.data(), 2);
++        LOG_INFO(Lib_NpManager, "Using configured player country {}", selected);
++        return;
++    }
+     const User* u = UserManagement.GetUserByID(user_id);
+     const std::string cfg = u ? u->np_country : std::string();
+     const bool ok = cfg.size() == 2 && std::isalpha(static_cast<unsigned char>(cfg[0])) &&
+@@ -507,7 +562,8 @@ s32 PS4_SYSV_ABI sceNpGetAccountCountry(OrbisNpOnlineId* online_id,
+     if (user_id == -1) {
+         return ORBIS_NP_ERROR_USER_NOT_FOUND;
+     }
+-    if (!g_shadnet_enabled || !Libraries::Np::NpHandler::GetInstance().IsPsnSignedIn(user_id)) {
++    if (ConfiguredPlayerCountry(user_id).empty() &&
++        (!g_shadnet_enabled || !Libraries::Np::NpHandler::GetInstance().IsPsnSignedIn(user_id))) {
+         return ORBIS_NP_ERROR_SIGNED_OUT;
+     }
+     FillCountryCodeFromProfile(user_id, country_code);
+@@ -523,7 +579,8 @@ s32 PS4_SYSV_ABI sceNpGetAccountCountryA(Libraries::UserService::OrbisUserServic
+     if (UserManagement.GetUserByID(user_id) == nullptr) {
+         return ORBIS_NP_ERROR_USER_NOT_FOUND;
+     }
+-    if (!g_shadnet_enabled || !Libraries::Np::NpHandler::GetInstance().IsPsnSignedIn(user_id)) {
++    if (ConfiguredPlayerCountry(user_id).empty() &&
++        (!g_shadnet_enabled || !Libraries::Np::NpHandler::GetInstance().IsPsnSignedIn(user_id))) {
+         return ORBIS_NP_ERROR_SIGNED_OUT;
+     }
+     FillCountryCodeFromProfile(user_id, country_code);

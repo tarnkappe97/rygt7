@@ -25,7 +25,9 @@ try {
     $rc = (Get-Command rc.exe).Source.Replace('\','/')
     cmake -S $source -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_LINKER=lld-link "-DCMAKE_MAKE_PROGRAM=$ninja" "-DCMAKE_RC_COMPILER=$rc" -DCMAKE_NINJA_CMCLDEPS_RC=0 -DSHADGT_RYTY_GPU=ON -DSHADGT_DIAGNOSTICS=ON -DHAVE_ENDIAN_H=OFF -DENABLE_DISCORD_RPC=ON
     if ($LASTEXITCODE -ne 0) { throw 'Renderer configuration failed' }
-    cmake --build $build --target ryty_gpu --parallel 4
-    if ($LASTEXITCODE -ne 0) { throw 'Renderer build failed' }
-    Get-FileHash -LiteralPath (Join-Path $build 'libSceVideoOut.prx')
+    cmake --build $build --target ryty_gpu ryty_np --parallel 4
+    if ($LASTEXITCODE -ne 0) { throw 'Renderer and NP library build failed' }
+    foreach ($file in 'libSceVideoOut.prx', 'libSceNpAuth.prx') {
+        Get-FileHash -LiteralPath (Join-Path $build $file)
+    }
 } finally { $env:LIB = $oldLib }
