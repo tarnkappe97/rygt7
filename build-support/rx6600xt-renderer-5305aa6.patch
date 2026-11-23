@@ -1,0 +1,17 @@
+diff --git a/src/video_core/renderer_vulkan/vk_instance.cpp b/src/video_core/renderer_vulkan/vk_instance.cpp
+index 4dd50db..5cbc65b 100644
+--- a/src/video_core/renderer_vulkan/vk_instance.cpp
++++ b/src/video_core/renderer_vulkan/vk_instance.cpp
+@@ -370,6 +370,12 @@ bool Instance::CreateDevice() {
+     vk12_props = properties_chain.get<vk::PhysicalDeviceVulkan12Properties>();
+     vk13_props = properties_chain.get<vk::PhysicalDeviceVulkan13Properties>();
+     push_descriptor_props = properties_chain.get<vk::PhysicalDevicePushDescriptorPropertiesKHR>();
++    // FIX-SGT-126: The RX 6600 XT's proprietary driver loses the device with pushed compute
++    // descriptors. Use allocated sets in both graphics and compute pipelines on this device.
++    if (IsAmdLegacyShaderCompiler() && GetModelName() == "AMD Radeon RX 6600 XT") {
++        push_descriptor_props.maxPushDescriptors = 0;
++        LOG_WARNING(Render_Vulkan, "Using allocated descriptor sets on the RX 6600 XT");
++    }
+     if (const auto simulated = GetSimulatedGpu(); simulated != SimulatedGpu::None) {
+         // AMD-300: before RDNA 3 only compute takes a required subgroup size, and GCN runs 64 only.
+         if (Simulates("sub")) {
